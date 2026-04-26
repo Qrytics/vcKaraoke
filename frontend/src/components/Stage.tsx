@@ -51,6 +51,8 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
   const isSinger = room.currentSingerId === playerId;
 
   useEffect(() => {
+    if (!room.currentSong) return;
+
     // Load YouTube IFrame API
     if (!window.YT) {
       const tag = document.createElement('script');
@@ -62,11 +64,12 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
     if (window.YT?.Player) initPlayer();
 
     function initPlayer() {
+      if (!room.currentSong) return;
       if (playerRef.current) {
         playerRef.current.destroy();
       }
       playerRef.current = new window.YT.Player('yt-player', {
-        videoId: room.currentSong!.videoId,
+        videoId: room.currentSong.videoId,
         playerVars: { autoplay: 0, controls: isSinger ? 1 : 0, rel: 0, modestbranding: 1 },
         events: {
           onReady: (e) => {

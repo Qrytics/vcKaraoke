@@ -192,7 +192,7 @@ io.on('connection', (socket) => {
     if (!room || socket.id !== room.hostId) return;
     room.currentSong = null;
     room.currentSingerId = null;
-    room.phase = room.queue.length > 0 ? 'lobby' : 'lobby';
+    room.phase = 'lobby';
     room.votes = new Map();
     room.lastActivity = Date.now();
     io.to(room.code).emit('room:updated', { room: roomToJSON(room) });
