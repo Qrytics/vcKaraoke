@@ -15,9 +15,16 @@ const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'devsecretsecretkeyfortesting1234';
-const LIVEKIT_URL = process.env.LIVEKIT_URL || 'wss://your-livekit-server.livekit.cloud';
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
+const LIVEKIT_URL = process.env.LIVEKIT_URL;
+
+if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
+  console.warn(
+    'Warning: LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and LIVEKIT_URL must be set for voice chat. ' +
+    'The /api/livekit-token endpoint will be unavailable until these are configured.'
+  );
+}
 
 // Room cleanup: delete rooms inactive for > 2 hours
 setInterval(() => {
@@ -32,6 +39,9 @@ setInterval(() => {
 
 // REST: LiveKit token
 app.get('/api/livekit-token', (req, res) => {
+  if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
+    return res.status(503).json({ error: 'Voice chat is not configured on this server' });
+  }
   const { roomCode, participantName, participantId } = req.query as Record<string, string>;
   if (!roomCode || !participantName || !participantId) {
     return res.status(400).json({ error: 'Missing params' });

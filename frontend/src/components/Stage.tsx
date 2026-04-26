@@ -79,7 +79,7 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
           onStateChange: (e) => {
             if (isSyncing.current) return;
             const state = window.YT.PlayerState;
-            const time = playerRef.current!.getCurrentTime();
+            const time = playerRef.current?.getCurrentTime() ?? 0;
             if (e.data === state.PLAYING) {
               socket.emit('player:play', { code: room.code, time });
             } else if (e.data === state.PAUSED) {
