@@ -25,6 +25,8 @@ export function createRoom(hostId: string, hostName: string): Room {
     isPlaying: false,
     phase: 'lobby',
     votes: new Map(),
+    latencyRttMs: new Map([[hostId, 120]]),
+    playbackOffsetsMs: new Map([[hostId, 0]]),
     lastActivity: Date.now(),
   };
   rooms.set(code, room);
@@ -44,14 +46,37 @@ export function getRooms(): Map<string, Room> {
 }
 
 export function extractVideoId(url: string): string | null {
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
-    /youtube\.com\/shorts\/([^&\n?#]+)/,
-  ];
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match) return match[1];
+  const validId = (id: string | null | undefined): string | null => {
+    if (!id) return null;
+    return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+  };
+
+  try {
+    const parsed = new URL(url.trim());
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+
+    if (host === 'youtu.be') {
+      const id = parsed.pathname.split('/').filter(Boolean)[0];
+      return validId(id);
+    }
+
+    if (host === 'youtube.com' || host === 'm.youtube.com') {
+      if (parsed.pathname === '/watch') {
+        return validId(parsed.searchParams.get('v'));
+      }
+      if (parsed.pathname.startsWith('/embed/')) {
+        const id = parsed.pathname.split('/')[2];
+        return validId(id);
+      }
+      if (parsed.pathname.startsWith('/shorts/')) {
+        const id = parsed.pathname.split('/')[2];
+        return validId(id);
+      }
+    }
+  } catch {
+    return null;
   }
+
   return null;
 }
 
@@ -67,5 +92,6 @@ export function roomToJSON(room: Room) {
     isPlaying: room.isPlaying,
     phase: room.phase,
     votes: Object.fromEntries(room.votes),
+    playbackOffsetsMs: Object.fromEntries(room.playbackOffsetsMs),
   };
 }

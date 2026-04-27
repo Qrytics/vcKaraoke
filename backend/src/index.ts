@@ -3,7 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import { createRoom, getRoom, deleteRoom, getRooms, extractVideoId, roomToJSON } from './rooms';
-import { Song } from './types';
+import { Room, Song } from './types';
 import { AccessToken } from 'livekit-server-sdk';
 
 const app = express();
@@ -14,6 +14,71 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
 });
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+async function fetchYouTubeVideoTitle(youtubeUrl: string): Promise<string | null> {
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(youtubeUrl)}&format=json`;
+    const res = await fetch(oembedUrl);
+    if (!res.ok) return null;
+    const data = await res.json() as { title?: string };
+    return data.title?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseSongAndArtist(videoTitle: string): { songName?: string; artistName?: string } {
+  const cleaned = videoTitle
+    .replace(/\[[^\]]*]/g, '')
+    .replace(/\([^)]*(official|audio|video|lyrics|mv|hd|4k)[^)]*\)/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const dashParts = cleaned.split(' - ').map(p => p.trim()).filter(Boolean);
+  if (dashParts.length >= 2) {
+    return { artistName: dashParts[0], songName: dashParts.slice(1).join(' - ') };
+  }
+
+  const byMatch = cleaned.match(/^(.+?)\s+by\s+(.+)$/i);
+  if (byMatch) {
+    return { songName: byMatch[1].trim(), artistName: byMatch[2].trim() };
+  }
+
+  return {};
+}
+
+function recomputePlaybackOffsets(room: Room): void {
+  const singerId = room.currentSingerId;
+  if (!singerId) {
+    room.playbackOffsetsMs = new Map();
+    for (const playerId of room.players.keys()) {
+      room.playbackOffsetsMs.set(playerId, 0);
+    }
+    return;
+  }
+
+  const singerRtt = room.latencyRttMs.get(singerId) ?? 120;
+  const singerUpstreamMs = singerRtt / 2;
+  const safetyMs = 60;
+  const offsets = new Map<string, number>();
+
+  for (const playerId of room.players.keys()) {
+    if (playerId === singerId) {
+      offsets.set(playerId, 0);
+      continue;
+    }
+    const audienceRtt = room.latencyRttMs.get(playerId) ?? 120;
+    const audienceDownstreamMs = audienceRtt / 2;
+    const offsetMs = clamp(Math.round(singerUpstreamMs + audienceDownstreamMs + safetyMs), 120, 900);
+    offsets.set(playerId, offsetMs);
+  }
+
+  room.playbackOffsetsMs = offsets;
+}
 
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
@@ -75,13 +140,30 @@ io.on('connection', (socket) => {
     }
     const player = { id: socket.id, name: playerName, score: 0, isHost: false };
     room.players.set(socket.id, player);
+    room.latencyRttMs.set(socket.id, 120);
+    room.playbackOffsetsMs.set(socket.id, 0);
+    if (room.phase === 'stage') {
+      recomputePlaybackOffsets(room);
+    }
     room.lastActivity = Date.now();
     socket.join(room.code);
     socket.emit('room:joined', { room: roomToJSON(room), playerId: socket.id });
     io.to(room.code).emit('room:updated', { room: roomToJSON(room) });
   });
 
-  socket.on('queue:add', ({ code, youtubeUrl }: { code: string; youtubeUrl: string }) => {
+  socket.on('latency:ping', ({ code, sentAt }: { code: string; sentAt: number }) => {
+    const room = getRoom(code);
+    if (!room || !room.players.has(socket.id)) return;
+    const rttMs = clamp(Date.now() - sentAt, 20, 2000);
+    room.latencyRttMs.set(socket.id, rttMs);
+    if (room.phase === 'stage') {
+      recomputePlaybackOffsets(room);
+      io.to(room.code).emit('room:updated', { room: roomToJSON(room) });
+    }
+    socket.emit('latency:pong', { sentAt, serverAt: Date.now() });
+  });
+
+  socket.on('queue:add', async ({ code, youtubeUrl }: { code: string; youtubeUrl: string }) => {
     const room = getRoom(code);
     if (!room) return;
     const player = room.players.get(socket.id);
@@ -91,11 +173,16 @@ io.on('connection', (socket) => {
       socket.emit('room:error', { message: 'Invalid YouTube URL' });
       return;
     }
+    const videoTitle = await fetchYouTubeVideoTitle(youtubeUrl) || 'YouTube video';
+    const { songName, artistName } = parseSongAndArtist(videoTitle);
+
     const song: Song = {
       id: `${Date.now()}-${Math.random()}`,
       youtubeUrl,
       videoId,
-      title: `Song by ${player.name}`,
+      title: videoTitle,
+      songName,
+      artistName,
       addedBy: socket.id,
       addedByName: player.name,
     };
@@ -129,13 +216,14 @@ io.on('connection', (socket) => {
     room.isPlaying = false;
     room.playerTime = 0;
     room.votes = new Map();
+    recomputePlaybackOffsets(room);
     room.lastActivity = Date.now();
     io.to(room.code).emit('room:updated', { room: roomToJSON(room) });
   });
 
   socket.on('player:play', ({ code, time }: { code: string; time: number }) => {
     const room = getRoom(code);
-    if (!room) return;
+    if (!room || socket.id !== room.currentSingerId) return;
     room.isPlaying = true;
     room.playerTime = time;
     room.lastActivity = Date.now();
@@ -144,7 +232,7 @@ io.on('connection', (socket) => {
 
   socket.on('player:pause', ({ code, time }: { code: string; time: number }) => {
     const room = getRoom(code);
-    if (!room) return;
+    if (!room || socket.id !== room.currentSingerId) return;
     room.isPlaying = false;
     room.playerTime = time;
     room.lastActivity = Date.now();
@@ -153,7 +241,7 @@ io.on('connection', (socket) => {
 
   socket.on('player:seek', ({ code, time }: { code: string; time: number }) => {
     const room = getRoom(code);
-    if (!room) return;
+    if (!room || socket.id !== room.currentSingerId) return;
     room.playerTime = time;
     room.lastActivity = Date.now();
     socket.to(room.code).emit('player:seek', { time });
@@ -214,6 +302,8 @@ io.on('connection', (socket) => {
       const room = getRoom(roomCode);
       if (!room) continue;
       room.players.delete(socket.id);
+      room.latencyRttMs.delete(socket.id);
+      room.playbackOffsetsMs.delete(socket.id);
       if (room.players.size === 0) {
         deleteRoom(roomCode);
         continue;
@@ -226,6 +316,9 @@ io.on('connection', (socket) => {
           room.hostId = newHost.id;
           room.players.set(newHost.id, newHost);
         }
+      }
+      if (room.phase === 'stage') {
+        recomputePlaybackOffsets(room);
       }
       io.to(roomCode).emit('room:updated', { room: roomToJSON(room) });
     }

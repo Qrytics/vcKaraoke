@@ -14,8 +14,40 @@ export default function Lobby({ room, playerId, isHost, socket }: Props) {
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [urlError, setUrlError] = useState('');
 
+  const isValidYouTubeUrl = (input: string): boolean => {
+    try {
+      const parsed = new URL(input.trim());
+      const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+      const validId = (id: string | null) => !!id && /^[A-Za-z0-9_-]{11}$/.test(id);
+
+      if (host === 'youtu.be') {
+        const id = parsed.pathname.split('/').filter(Boolean)[0] ?? null;
+        return validId(id);
+      }
+
+      if (host === 'youtube.com' || host === 'm.youtube.com') {
+        if (parsed.pathname === '/watch') return validId(parsed.searchParams.get('v'));
+        if (parsed.pathname.startsWith('/embed/')) {
+          const id = parsed.pathname.split('/')[2] ?? null;
+          return validId(id);
+        }
+        if (parsed.pathname.startsWith('/shorts/')) {
+          const id = parsed.pathname.split('/')[2] ?? null;
+          return validId(id);
+        }
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  };
+
   const addSong = () => {
     if (!youtubeUrl.trim()) { setUrlError('Enter a YouTube URL'); return; }
+    if (!isValidYouTubeUrl(youtubeUrl)) {
+      setUrlError('Please enter a valid YouTube video link');
+      return;
+    }
     setUrlError('');
     socket.emit('queue:add', { code: room.code, youtubeUrl: youtubeUrl.trim() });
     setYoutubeUrl('');
@@ -87,23 +119,28 @@ export default function Lobby({ room, playerId, isHost, socket }: Props) {
           <p className="text-gray-600 text-sm text-center py-6">No songs queued yet. Add one above!</p>
         ) : (
           <ul className="space-y-2 max-h-48 overflow-y-auto">
-            {room.queue.map((song, idx) => (
-              <li key={song.id} className="flex items-center gap-2 bg-gray-800 rounded-lg px-3 py-2">
-                <span className="text-gray-500 text-sm w-5">{idx + 1}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-white truncate">{song.title}</p>
-                  <p className="text-xs text-gray-500">by {song.addedByName}</p>
-                </div>
-                {(isHost || song.addedBy === playerId) && (
-                  <button
-                    onClick={() => removeSong(song.id)}
-                    className="text-red-500 hover:text-red-400 text-xs flex-shrink-0"
-                  >
-                    ✕
-                  </button>
-                )}
-              </li>
-            ))}
+            {room.queue.map((song, idx) => {
+              const headline = song.songName && song.artistName
+                ? `${song.songName} by ${song.artistName}`
+                : song.title;
+              return (
+                <li key={song.id} className="flex items-center gap-2 bg-gray-800 rounded-lg px-3 py-2">
+                  <span className="text-gray-500 text-sm w-5">{idx + 1}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-white truncate">{headline}</p>
+                    <p className="text-xs text-gray-500">queued by {song.addedByName}</p>
+                  </div>
+                  {(isHost || song.addedBy === playerId) && (
+                    <button
+                      onClick={() => removeSong(song.id)}
+                      className="text-red-500 hover:text-red-400 text-xs flex-shrink-0"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
 

@@ -57,6 +57,14 @@ export default function RoomPage() {
     };
   }, [code, router]);
 
+  useEffect(() => {
+    const socket = socketRef.current;
+    const emitPing = () => socket.emit('latency:ping', { code, sentAt: Date.now() });
+    emitPing();
+    const interval = setInterval(emitPing, 5000);
+    return () => clearInterval(interval);
+  }, [code]);
+
   if (error) {
     return (
       <main className="min-h-screen flex items-center justify-center p-4">

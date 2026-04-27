@@ -10,6 +10,8 @@ export interface Song {
   youtubeUrl: string;
   videoId: string;
   title: string;
+  songName?: string;
+  artistName?: string;
   addedBy: string;
   addedByName: string;
 }
@@ -25,4 +27,5 @@ export interface Room {
   isPlaying: boolean;
   phase: 'lobby' | 'stage' | 'voting' | 'leaderboard';
   votes: Record<string, number>;
+  playbackOffsetsMs: Record<string, number>;
 }

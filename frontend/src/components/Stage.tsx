@@ -13,6 +13,7 @@ declare global {
           events: {
             onReady?: (event: { target: YouTubePlayer }) => void;
             onStateChange?: (event: { data: number }) => void;
+            onError?: (event: { data: number }) => void;
           };
           playerVars?: Record<string, unknown>;
         }
@@ -47,11 +48,21 @@ interface Props {
 export default function Stage({ room, playerId, isHost, socket }: Props) {
   const playerRef = useRef<YouTubePlayer | null>(null);
   const [playerReady, setPlayerReady] = useState(false);
+  const [playerError, setPlayerError] = useState<string>('');
   const isSyncing = useRef(false);
+  const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isSinger = room.currentSingerId === playerId;
+  const playbackOffsetSec = (room.playbackOffsetsMs?.[playerId] ?? 0) / 1000;
+  const compensatedTime = (baseTime: number) => Math.max(0, baseTime - playbackOffsetSec);
 
   useEffect(() => {
     if (!room.currentSong) return;
+    if (!room.currentSong.videoId || !/^[A-Za-z0-9_-]{11}$/.test(room.currentSong.videoId)) {
+      setPlayerError('This song has an invalid YouTube video id. Skip to continue.');
+      return;
+    }
+    setPlayerError('');
+    setPlayerReady(false);
 
     // Load YouTube IFrame API
     if (!window.YT) {
@@ -68,28 +79,40 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
       if (playerRef.current) {
         playerRef.current.destroy();
       }
-      playerRef.current = new window.YT.Player('yt-player', {
-        videoId: room.currentSong.videoId,
-        playerVars: { autoplay: 0, controls: isSinger ? 1 : 0, rel: 0, modestbranding: 1 },
-        events: {
-          onReady: (e) => {
-            setPlayerReady(true);
-            if (room.playerTime > 0) e.target.seekTo(room.playerTime, true);
+      try {
+        playerRef.current = new window.YT.Player('yt-player', {
+          videoId: room.currentSong.videoId,
+          playerVars: { autoplay: 0, controls: isSinger ? 1 : 0, rel: 0, modestbranding: 1 },
+          events: {
+            onReady: (e) => {
+              setPlayerReady(true);
+              setPlayerError('');
+              if (room.playerTime > 0) e.target.seekTo(compensatedTime(room.playerTime), true);
+            },
+            onStateChange: (e) => {
+              if (isSyncing.current) return;
+              if (!isSinger) return;
+              const state = window.YT.PlayerState;
+              const time = playerRef.current?.getCurrentTime() ?? 0;
+              if (e.data === state.PLAYING) {
+                socket.emit('player:play', { code: room.code, time });
+              } else if (e.data === state.PAUSED) {
+                socket.emit('player:pause', { code: room.code, time });
+              } else if (e.data === state.ENDED && isHost) {
+                socket.emit('stage:end', { code: room.code });
+              }
+            },
+            onError: () => {
+              setPlayerError('This YouTube video cannot be played. Skip to continue.');
+              setPlayerReady(false);
+            },
           },
-          onStateChange: (e) => {
-            if (isSyncing.current) return;
-            const state = window.YT.PlayerState;
-            const time = playerRef.current?.getCurrentTime() ?? 0;
-            if (e.data === state.PLAYING) {
-              socket.emit('player:play', { code: room.code, time });
-            } else if (e.data === state.PAUSED) {
-              socket.emit('player:pause', { code: room.code, time });
-            } else if (e.data === state.ENDED && isHost) {
-              socket.emit('stage:end', { code: room.code });
-            }
-          },
-        },
-      });
+        });
+      } catch (err) {
+        console.error('YouTube player init failed:', err);
+        setPlayerError('Could not load this YouTube video. Skip to continue.');
+        setPlayerReady(false);
+      }
     }
 
     return () => {
@@ -97,15 +120,31 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
       playerRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.currentSong?.videoId]);
+  }, [room.currentSong?.videoId, isSinger]);
 
   useEffect(() => {
+    if (syncIntervalRef.current) {
+      clearInterval(syncIntervalRef.current);
+      syncIntervalRef.current = null;
+    }
+
+    if (isSinger && playerReady) {
+      // Singer periodically publishes canonical time to reduce drift for audience clients.
+      syncIntervalRef.current = setInterval(() => {
+        if (!playerRef.current) return;
+        const state = playerRef.current.getPlayerState();
+        if (state !== window.YT.PlayerState.PLAYING) return;
+        socket.emit('player:seek', { code: room.code, time: playerRef.current.getCurrentTime() });
+      }, 1200);
+    }
+
     socket.on('player:play', ({ time }: { time: number }) => {
       if (!playerRef.current || !playerReady) return;
       isSyncing.current = true;
       const currentTime = playerRef.current.getCurrentTime();
-      if (Math.abs(currentTime - time) > 2) {
-        playerRef.current.seekTo(time, true);
+      const targetTime = compensatedTime(time);
+      if (Math.abs(currentTime - targetTime) > 0.75) {
+        playerRef.current.seekTo(targetTime, true);
       }
       playerRef.current.playVideo();
       setTimeout(() => { isSyncing.current = false; }, 500);
@@ -114,22 +153,30 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
     socket.on('player:pause', ({ time }: { time: number }) => {
       if (!playerRef.current || !playerReady) return;
       isSyncing.current = true;
-      playerRef.current.seekTo(time, true);
+      playerRef.current.seekTo(compensatedTime(time), true);
       playerRef.current.pauseVideo();
       setTimeout(() => { isSyncing.current = false; }, 500);
     });
 
     socket.on('player:seek', ({ time }: { time: number }) => {
       if (!playerRef.current || !playerReady) return;
-      playerRef.current.seekTo(time, true);
+      const targetTime = compensatedTime(time);
+      const currentTime = playerRef.current.getCurrentTime();
+      if (Math.abs(currentTime - targetTime) > 0.35) {
+        playerRef.current.seekTo(targetTime, true);
+      }
     });
 
     return () => {
+      if (syncIntervalRef.current) {
+        clearInterval(syncIntervalRef.current);
+        syncIntervalRef.current = null;
+      }
       socket.off('player:play');
       socket.off('player:pause');
       socket.off('player:seek');
     };
-  }, [socket, playerReady]);
+  }, [socket, playerReady, isSinger, room.code, playbackOffsetSec]);
 
   const singer = room.players.find(p => p.id === room.currentSingerId);
 
@@ -165,9 +212,24 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
             </div>
           </div>
         )}
+        {playerError && (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/95">
+            <div className="text-center space-y-2 p-4">
+              <p className="text-red-400 text-sm">{playerError}</p>
+              {isHost && (
+                <button
+                  className="bg-red-700 hover:bg-red-600 text-white text-sm font-bold px-4 py-2 rounded-lg"
+                  onClick={() => socket.emit('stage:end', { code: room.code })}
+                >
+                  Skip This Song
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         {!isSinger && playerReady && (
           <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-gray-400 px-2 py-1 rounded">
-            Synced with {singer?.name}
+            Synced with {singer?.name} (+{Math.round(playbackOffsetSec * 1000)}ms delay)
           </div>
         )}
       </div>
