@@ -38,7 +38,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // REST: LiveKit token
-app.get('/api/livekit-token', (req, res) => {
+app.get('/api/livekit-token', async (req, res) => {
   if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
     return res.status(503).json({ error: 'Voice chat is not configured on this server' });
   }
@@ -51,7 +51,7 @@ app.get('/api/livekit-token', (req, res) => {
     name: participantName,
   });
   at.addGrant({ roomJoin: true, room: roomCode, canPublish: true, canSubscribe: true });
-  const token = at.toJwt();
+  const token = await at.toJwt();
   res.json({ token, url: LIVEKIT_URL });
 });
 
