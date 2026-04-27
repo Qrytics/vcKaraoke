@@ -49,11 +49,50 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
   const playerRef = useRef<YouTubePlayer | null>(null);
   const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState<string>('');
+  const [lyrics, setLyrics] = useState<string>('Loading lyrics...');
+  const [lyricsSource, setLyricsSource] = useState<'youtube_transcript' | 'lyrics_search' | 'none'>('none');
+  const [lyricsLoading, setLyricsLoading] = useState(false);
   const isSyncing = useRef(false);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isSinger = room.currentSingerId === playerId;
   const playbackOffsetSec = (room.playbackOffsetsMs?.[playerId] ?? 0) / 1000;
   const compensatedTime = (baseTime: number) => Math.max(0, baseTime - playbackOffsetSec);
+
+  useEffect(() => {
+    if (!room.currentSong) return;
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+    const params = new URLSearchParams({
+      videoId: room.currentSong.videoId,
+      songName: room.currentSong.songName || '',
+      artistName: room.currentSong.artistName || '',
+    });
+
+    let cancelled = false;
+    setLyricsLoading(true);
+    setLyrics('Loading lyrics...');
+    setLyricsSource('none');
+
+    fetch(`${backendUrl}/api/lyrics?${params.toString()}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error('Lyrics request failed');
+        const payload = await res.json() as { lyrics?: string; source?: 'youtube_transcript' | 'lyrics_search' | 'none' };
+        if (cancelled) return;
+        setLyrics(payload.lyrics?.trim() || 'Unable to find lyrics');
+        setLyricsSource(payload.source || 'none');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLyrics('Unable to find lyrics');
+        setLyricsSource('none');
+      })
+      .finally(() => {
+        if (!cancelled) setLyricsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [room.currentSong]);
 
   useEffect(() => {
     if (!room.currentSong) return;
@@ -181,7 +220,7 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
   const singer = room.players.find(p => p.id === room.currentSingerId);
 
   return (
-    <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-4">
+    <div className="max-w-6xl mx-auto p-4 md:p-6 space-y-4">
       {/* Singer info */}
       <div className="bg-gray-900 rounded-2xl p-4 border border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -201,37 +240,52 @@ export default function Stage({ room, playerId, isHost, socket }: Props) {
         )}
       </div>
 
-      {/* YouTube Player */}
-      <div className="relative bg-black rounded-2xl overflow-hidden aspect-video border border-gray-800">
-        <div id="yt-player" className="w-full h-full" />
-        {!playerReady && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
-            <div className="text-center">
-              <div className="text-4xl mb-2 animate-bounce">🎵</div>
-              <p className="text-gray-400">Loading video...</p>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* YouTube Player */}
+        <div className="relative bg-black rounded-2xl overflow-hidden aspect-video border border-gray-800 lg:col-span-2">
+          <div id="yt-player" className="w-full h-full" />
+          {!playerReady && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+              <div className="text-center">
+                <div className="text-4xl mb-2 animate-bounce">🎵</div>
+                <p className="text-gray-400">Loading video...</p>
+              </div>
             </div>
-          </div>
-        )}
-        {playerError && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/95">
-            <div className="text-center space-y-2 p-4">
-              <p className="text-red-400 text-sm">{playerError}</p>
-              {isHost && (
-                <button
-                  className="bg-red-700 hover:bg-red-600 text-white text-sm font-bold px-4 py-2 rounded-lg"
-                  onClick={() => socket.emit('stage:end', { code: room.code })}
-                >
-                  Skip This Song
-                </button>
-              )}
+          )}
+          {playerError && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-900/95">
+              <div className="text-center space-y-2 p-4">
+                <p className="text-red-400 text-sm">{playerError}</p>
+                {isHost && (
+                  <button
+                    className="bg-red-700 hover:bg-red-600 text-white text-sm font-bold px-4 py-2 rounded-lg"
+                    onClick={() => socket.emit('stage:end', { code: room.code })}
+                  >
+                    Skip This Song
+                  </button>
+                )}
+              </div>
             </div>
+          )}
+          {!isSinger && playerReady && (
+            <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-gray-400 px-2 py-1 rounded">
+              Synced with {singer?.name} (+{Math.round(playbackOffsetSec * 1000)}ms delay)
+            </div>
+          )}
+        </div>
+
+        {/* Lyrics sidebar */}
+        <aside className="bg-gray-900 rounded-2xl p-4 border border-gray-800 min-h-[18rem] max-h-[34rem] overflow-y-auto">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-semibold text-gray-300">Lyrics</p>
+            <span className="text-[10px] uppercase tracking-wide text-gray-500">
+              {lyricsLoading ? 'loading' : lyricsSource === 'youtube_transcript' ? 'YouTube transcript' : lyricsSource === 'lyrics_search' ? 'lyrics lookup' : 'fallback'}
+            </span>
           </div>
-        )}
-        {!isSinger && playerReady && (
-          <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-gray-400 px-2 py-1 rounded">
-            Synced with {singer?.name} (+{Math.round(playbackOffsetSec * 1000)}ms delay)
-          </div>
-        )}
+          <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-6 text-gray-200">
+            {lyrics}
+          </pre>
+        </aside>
       </div>
 
       {/* Song info */}

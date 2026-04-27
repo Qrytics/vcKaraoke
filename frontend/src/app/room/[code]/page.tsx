@@ -70,7 +70,7 @@ export default function RoomPage() {
       <main className="min-h-screen flex items-center justify-center p-4">
         <div className="text-center">
           <p className="text-red-400 text-xl mb-4">{error}</p>
-          <button onClick={() => router.push('/')} className="bg-purple-600 hover:bg-purple-500 px-6 py-2 rounded-lg">
+          <button onClick={() => router.push('/games/vcKaraoke')} className="bg-purple-600 hover:bg-purple-500 px-6 py-2 rounded-lg">
             Go Home
           </button>
         </div>

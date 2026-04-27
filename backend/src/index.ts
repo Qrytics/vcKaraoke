@@ -5,6 +5,7 @@ import cors from 'cors';
 import { createRoom, getRoom, deleteRoom, getRooms, extractVideoId, roomToJSON } from './rooms';
 import { Room, Song } from './types';
 import { AccessToken } from 'livekit-server-sdk';
+import { YoutubeTranscript } from 'youtube-transcript';
 
 const app = express();
 app.use(cors());
@@ -49,6 +50,52 @@ function parseSongAndArtist(videoTitle: string): { songName?: string; artistName
   }
 
   return {};
+}
+
+function normalizeLyricText(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+async function fetchLyrics(
+  videoId: string,
+  songName?: string,
+  artistName?: string
+): Promise<{ lyrics: string; source: 'youtube_transcript' | 'lyrics_search' | 'none' }> {
+  try {
+    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
+    const transcriptLines = transcript
+      .map((line) => normalizeLyricText(line.text))
+      .filter((line) => line.length > 0);
+    if (transcriptLines.length > 0) {
+      return { lyrics: transcriptLines.join('\n'), source: 'youtube_transcript' };
+    }
+  } catch {
+    // Continue to lyric fallback.
+  }
+
+  if (songName && artistName) {
+    try {
+      const res = await fetch(`https://api.lyrics.ovh/v1/${encodeURIComponent(artistName)}/${encodeURIComponent(songName)}`);
+      if (res.ok) {
+        const payload = await res.json() as { lyrics?: string };
+        const lyrics = normalizeLyricText(payload.lyrics || '');
+        if (lyrics) {
+          return { lyrics, source: 'lyrics_search' };
+        }
+      }
+    } catch {
+      // Fallback below.
+    }
+  }
+
+  return { lyrics: 'Unable to find lyrics', source: 'none' };
 }
 
 function recomputePlaybackOffsets(room: Room): void {
@@ -122,6 +169,21 @@ app.get('/api/livekit-token', async (req, res) => {
 
 // REST: health
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+// REST: lyrics lookup
+app.get('/api/lyrics', async (req, res) => {
+  const { videoId, songName, artistName } = req.query as Record<string, string>;
+  if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    return res.status(400).json({ error: 'Invalid videoId' });
+  }
+
+  const lyricsResult = await fetchLyrics(
+    videoId,
+    songName?.trim() || undefined,
+    artistName?.trim() || undefined
+  );
+  res.json(lyricsResult);
+});
 
 io.on('connection', (socket) => {
   console.log('connected:', socket.id);
